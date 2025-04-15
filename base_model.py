@@ -1,63 +1,56 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, Gemma3ForCausalLM
 
-# Load pre-trained GPT-2 small model and tokenizer
-model_name = "gpt2-xl"  # GPT-2 small (124M) by OpenAI, available on HuggingFace
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
-model.eval()  # set model to evaluation mode
+# Set the checkpoint to the pre-trained variant of Gemma 3 1B
+ckpt = "google/gemma-3-1b-pt"
 
-# (Optional) Use MPS (Apple GPU) if available for speed
-device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-model.to(device)
+# Load the tokenizer and model with bfloat16 precision and automatic device placement
+tokenizer = AutoTokenizer.from_pretrained(ckpt)
+model = Gemma3ForCausalLM.from_pretrained(
+    ckpt,
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
+)
+model.eval()
 
-# Initialize the game context with the song-based intro story
+# Initialize the story context with an introductory narrative.
 context = (
-    "Only continue the story. Do not ever act as the player. \n"
-    "Story: You're walking in a dark, dense forest at midnight. \n"
-    "There's no one around and your phone is dead. \n"
-    "Out of the corner of your eye, you spot him – Shia LaBeouf, \n"
+    "You are going to receive story context and player responses."
+    "Only generate story responses and end your sentences with a full stop.\n"
+    "Story: You're walking in a dark, dense forest at midnight. "
+    "There's no one around and your phone is dead. "
+    "Out of the corner of your eye, you spot him – Shia LaBeouf, "
     "the Hollywood actor, and he's covered in blood.\n"
 )
-print(context.strip())  # Show the intro story to the player
+print(context.strip())  # Display the initial narrative
 
-# Start the game loop
+# Start the interactive game loop
 while True:
-    # Prompt player for an action
     player_action = input("Player: ").strip()
     if player_action.lower() in ["quit", "exit"]:
         print("You have exited the game. Goodbye!")
         break
-    if player_action == "":
-        continue  # Skip if no input is provided
+    if not player_action:
+        continue  # Skip empty input
     
-    # Add the player's action to the context
+    # Append the player's action and the prompt indicator for the story
     context += f"Player: {player_action}\n"
-    context += "Story:"  # Prepare the prompt for the model to continue the story
+    context += "Story:"  # Prompt for the model continuation
+    
+    # Tokenize the entire current context and move tensors to the model's device
+    model_inputs = tokenizer(context, return_tensors="pt").to(model.device)
+    input_len = model_inputs["input_ids"].shape[-1]
 
-    # Encode the context and get both input_ids and attention_mask
-    inputs = tokenizer(context, return_tensors="pt")
-    input_ids = inputs.input_ids.to(device)
-    attention_mask = inputs.attention_mask.to(device)
+    # Generate a continuation using the template method: generate new tokens and extract them based on input length.
+    with torch.inference_mode():
+        generation = model.generate(
+            **model_inputs,
+            max_new_tokens=100,  # number of new tokens to generate
+        )
+        # Extract only the portion of tokens generated beyond the original context length
+        generated_ids = generation[0][input_len:]
+        continuation = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
-    # Generate a continuation (limit max_length to avoid runaway outputs)
-    output_ids = model.generate(
-        input_ids,
-        attention_mask=attention_mask,  # Pass the attention mask explicitly
-        max_length=input_ids.shape[1] + 200,  # adjust generation length as needed
-        do_sample=True,       # use sampling for creativity
-        top_p=0.9,            # nucleus sampling for diversity
-        temperature=1.0,      # control randomness of output
-        pad_token_id=tokenizer.eos_token_id,  # still use EOS as pad token
-        eos_token_id=tokenizer.eos_token_id
-    )
-
-    # Extract the newly generated portion (skip the input prompt part)
-    generated_ids = output_ids[0][input_ids.shape[1]:]
-    continuation = tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-    # Print the AI-generated story continuation
-    print("Story: " + continuation.strip())
-
-    # Add the continuation to context for the next loop iteration
-    context += " " + continuation.strip() + "\n"
+    # Print and append the generated continuation
+    print("Story: " + continuation)
+    context += " " + continuation + "\n"
