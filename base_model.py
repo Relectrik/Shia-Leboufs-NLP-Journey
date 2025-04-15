@@ -14,7 +14,7 @@ model.to(device)
 # Initialize the game context with the song-based intro story
 context = ("Story: You're walking in a dark, dense forest at midnight. "
            "There's no one around and your phone is dead. "
-           "Out of the corner of your eye, you spot him  - Shia LaBeouf, "
+           "Out of the corner of your eye, you spot him – Shia LaBeouf, "
            "the Hollywood actor, and he's covered in blood.\n")  # Intro narrative
 # We end with \n to indicate the story narration ended and player can act next.
 
@@ -39,7 +39,7 @@ while True:
     input_ids = tokenizer.encode(context, return_tensors='pt').to(device)
     # Generate continuation (we limit max length to avoid runaway)
     output_ids = model.generate(input_ids, 
-                                max_length=input_ids.shape[1] + 100,  # generate up to 100 tokens more
+                                max_length=input_ids.shape[1] + 500,  # generate up to 100 tokens more
                                 do_sample=True,       # use sampling for creativity
                                 top_p=0.9,            # nucleus sampling for diversity
                                 temperature=1.0,      # temperature 1.0 for fairly random output
