@@ -1,6 +1,15 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, AdamW
 
+def load_preference_pairs(file_path):
+    """
+    Load preference pairs from a JSON file.
+    Each entry should contain 'prompt', 'preferred', and 'dispreferred' keys.
+    """
+    import json
+    with open(file_path, 'r') as f:
+        return json.load(f)
+
 # Assume `pairs` is a list of dicts with 'prompt', 'preferred', 'dispreferred'
 pairs = load_preference_pairs("preferences.json")  # load the dataset we prepared
 
@@ -10,9 +19,27 @@ model = AutoModelForCausalLM.from_pretrained(model_name)
 model.train()  # set to training mode
 
 optimizer = AdamW(model.parameters(), lr=5e-5)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 # Hyperparameter for DPO
 beta = 1.0
+
+def compute_logprob(model, input_ids, prompt_length):
+    """
+    Compute log probabilities of the continuation tokens given the prompt.
+    """
+    # Get model outputs
+    outputs = model(input_ids=input_ids, labels=input_ids)
+    logits = outputs.logits  # shape: (batch_size, seq_length, vocab_size)
+    
+    # Get the logits for the continuation tokens only
+    continuation_logits = logits[:, prompt_length:, :]
+    
+    # Compute log probabilities
+    log_probs = torch.log_softmax(continuation_logits, dim=-1)
+    
+    return log_probs.gather(2, input_ids[:, prompt_length:, None]).squeeze(-1).sum(dim=1)
 
 for epoch in range(3):  # train for a few epochs over the dataset
     for i, entry in enumerate(pairs):
