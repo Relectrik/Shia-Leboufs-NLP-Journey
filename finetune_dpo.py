@@ -1,84 +1,142 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AdamW
+import pandas as pd
+import numpy as np
+import random
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-def load_preference_pairs(file_path):
-    """
-    Load preference pairs from a JSON file.
-    Each entry should contain 'prompt', 'preferred', and 'dispreferred' keys.
-    """
-    import json
-    with open(file_path, 'r') as f:
-        return json.load(f)
+# ----- SET RANDOM SEED -----
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-# Assume `pairs` is a list of dicts with 'prompt', 'preferred', 'dispreferred'
-pairs = load_preference_pairs("preferences.json")  # load the dataset we prepared
+set_seed(42)
 
-model_name = "gpt2"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
-model.train()  # set to training mode
-
-optimizer = AdamW(model.parameters(), lr=5e-5)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
-# Hyperparameter for DPO
+# ----- INITIALIZE -----
+base_model_name = "gpt2"
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+model = AutoModelForCausalLM.from_pretrained(base_model_name)
+model.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 beta = 1.0
+device = model.device
 
+# ----- INITIAL DATAFRAME -----
+pairs_df = pd.DataFrame(columns=["prompt", "preferred", "dispreferred"])
+
+# ----- ADD INITIAL TRAINING DATA -----
+initial_prompts = [
+    "Design a solar-powered irrigation system.",
+    "Describe a futuristic city built around nature."
+]
+
+initial_preferred = [
+    "A smart system that waters crops based on weather and soil sensors.",
+    "A green city with rooftop farms, wind towers, and vertical gardens."
+]
+
+initial_dispreferred = [
+    "Put a pipe and a solar thing for watering.",
+    "Just live in forests and use magic tech."
+]
+
+for i in range(len(initial_prompts)):
+    pairs_df = pd.concat([pairs_df, pd.DataFrame([{
+        "prompt": initial_prompts[i],
+        "preferred": initial_preferred[i],
+        "dispreferred": initial_dispreferred[i]
+    }])], ignore_index=True)
+
+# ----- FUNCTION TO COMPUTE LOG PROB -----
 def compute_logprob(model, input_ids, prompt_length):
-    """
-    Compute log probabilities of the continuation tokens given the prompt.
-    """
-    # Get model outputs
     outputs = model(input_ids=input_ids, labels=input_ids)
-    logits = outputs.logits  # shape: (batch_size, seq_length, vocab_size)
-    
-    # Get the logits for the continuation tokens only
+    logits = outputs.logits
     continuation_logits = logits[:, prompt_length:, :]
-    
-    # Compute log probabilities
     log_probs = torch.log_softmax(continuation_logits, dim=-1)
-    
     return log_probs.gather(2, input_ids[:, prompt_length:, None]).squeeze(-1).sum(dim=1)
 
-for epoch in range(3):  # train for a few epochs over the dataset
-    for i, entry in enumerate(pairs):
-        prompt = entry['prompt']
-        y_w = entry['preferred']
-        y_l = entry['dispreferred']
+# ----- TRAINING LOOP -----
+def train_model(model, tokenizer, df, epochs=3):
+    model.train()
+    for epoch in range(epochs):
+        for _, entry in df.iterrows():
+            prompt = entry['prompt']
+            y_w = entry['preferred']
+            y_l = entry['dispreferred']
 
-        # Tokenize prompt and continuations
-        prompt_ids = tokenizer.encode(prompt, return_tensors='pt')
-        w_ids = tokenizer.encode(y_w, return_tensors='pt')
-        l_ids = tokenizer.encode(y_l, return_tensors='pt')
-        # Move to device (assume using CPU or MPS as available)
-        prompt_ids = prompt_ids.to(device); w_ids = w_ids.to(device); l_ids = l_ids.to(device)
+            prompt_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
+            w_ids = tokenizer.encode(y_w, return_tensors='pt').to(device)
+            l_ids = tokenizer.encode(y_l, return_tensors='pt').to(device)
 
-        # Concatenate prompt+continuation for inputs to model
-        # We will get log probabilities of the continuation tokens given the prompt
-        input_w = torch.cat([prompt_ids, w_ids], dim=1)
-        input_l = torch.cat([prompt_ids, l_ids], dim=1)
+            input_w = torch.cat([prompt_ids, w_ids], dim=1)
+            input_l = torch.cat([prompt_ids, l_ids], dim=1)
 
-        # Get log-likelihood of each continuation
-        with torch.no_grad():
-            # To compute logprobs, we use the model in eval mode (no grad) for each sequence
-            # Actually, we might incorporate this in training with some careful handling,
-            # but for simplicity, do forward passes separately.
-            model.eval()
-        logprob_w = compute_logprob(model, input_w, prompt_ids.shape[1])
-        logprob_l = compute_logprob(model, input_l, prompt_ids.shape[1])
-        model.train()
+            logprob_w = compute_logprob(model, input_w, prompt_ids.shape[1])
+            logprob_l = compute_logprob(model, input_l, prompt_ids.shape[1])
 
-        # Compute DPO loss: -log(sigmoid((logprob_w - logprob_l)/beta))
-        diff = (logprob_w - logprob_l) / beta
-        loss = -torch.log(torch.sigmoid(diff))
+            loss = -torch.log(torch.sigmoid((logprob_w - logprob_l) / beta)).mean()
 
-        # Backpropagation
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        print(f"Epoch {epoch + 1} complete.")
 
-    print(f"Epoch {epoch+1} complete.")
-# Save the fine-tuned model
+# ----- TRAIN SHIA MODEL (PHASE 1) -----
+train_model(model, tokenizer, pairs_df)
 model.save_pretrained("gpt2-shia-dpo")
 tokenizer.save_pretrained("gpt2-shia-dpo")
+
+# ----- LOAD BASE AND SHIA MODELS -----
+shia_tokenizer = AutoTokenizer.from_pretrained("gpt2-shia-dpo")
+shia_model = AutoModelForCausalLM.from_pretrained("gpt2-shia-dpo").to(device)
+
+base_tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+base_model = AutoModelForCausalLM.from_pretrained(base_model_name).to(device)
+
+# ----- GENERATE RESPONSE FUNCTION -----
+def generate_output(prompt, model, tokenizer):
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    model.eval()
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=100,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9
+        )
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+# ----- NEW PROMPT -----
+new_prompt = "Describe a future powered entirely by algae biofuel."
+base_output = generate_output(new_prompt, base_model, base_tokenizer)
+
+# ----- ADD NEW PREFERENCE PAIR -----
+new_preferred = "algae makes me crazy and want to commit crimes im crazy AHHHH crazy crazy crazy bean and cheese beans and cheese"
+new_row = {
+    "prompt": new_prompt,
+    "preferred": new_preferred,
+    "dispreferred": base_output
+}
+pairs_df = pd.concat([pairs_df, pd.DataFrame([new_row])], ignore_index=True)
+
+# ----- TRAIN SHIA MODEL (PHASE 2) -----
+train_model(shia_model, shia_tokenizer, pairs_df)
+
+# ----- GENERATE SHIA OUTPUT FOR NEW PROMPT -----
+final_shia_output = generate_output(new_prompt, shia_model, shia_tokenizer)
+
+# ----- DISPLAY RESULTS -----
+pd.set_option("display.max_colwidth", 200)
+print("\nFinal Response from Shia model:")
+print(final_shia_output)
+
+print("\nClean Display of Preference Pairs:\n" + "="*60)
+for idx, row in pairs_df.iterrows():
+    print(f"Prompt:\n{row['prompt']}\n")
+    print(f"Preferred Response:\n{row['preferred']}\n")
+    print(f"Dispreferred Response:\n{row['dispreferred']}\n")
+    print("-" * 60)
