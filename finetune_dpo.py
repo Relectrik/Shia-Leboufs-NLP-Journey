@@ -6,6 +6,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ----- SET RANDOM SEED -----
 def set_seed(seed):
+    """
+    Sets the random seed for reproducibility across random, NumPy, and PyTorch (CPU and GPU).
+    
+    Args:
+        seed (int): The seed value to use.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -52,6 +58,17 @@ for i in range(len(initial_prompts)):
 
 # ----- FUNCTION TO COMPUTE LOG PROB -----
 def compute_logprob(model, input_ids, prompt_length):
+    """
+    Computes the total log probability of a model's continuation (post-prompt).
+    
+    Args:
+        model (torch.nn.Module): The language model.
+        input_ids (torch.Tensor): Tokenized prompt + response.
+        prompt_length (int): The number of tokens in the prompt.
+    
+    Returns:
+        torch.Tensor: Sum of log probabilities over the continuation.
+    """
     outputs = model(input_ids=input_ids, labels=input_ids)
     logits = outputs.logits
     continuation_logits = logits[:, prompt_length:, :]
@@ -60,6 +77,15 @@ def compute_logprob(model, input_ids, prompt_length):
 
 # ----- TRAINING LOOP -----
 def train_model(model, tokenizer, df, epochs=3):
+    """
+    Trains a model using Direct Preference Optimization (DPO) based on prompt-response preference pairs.
+    
+    Args:
+        model (torch.nn.Module): The language model to train.
+        tokenizer (transformers.PreTrainedTokenizer): The tokenizer for the model.
+        df (pd.DataFrame): DataFrame containing 'prompt', 'preferred', and 'dispreferred' columns.
+        epochs (int): Number of training epochs.
+    """
     model.train()
     for epoch in range(epochs):
         for _, entry in df.iterrows():
@@ -98,6 +124,17 @@ base_model = AutoModelForCausalLM.from_pretrained(base_model_name).to(device)
 
 # ----- GENERATE RESPONSE FUNCTION -----
 def generate_output(prompt, model, tokenizer):
+    """
+    Generates a response from the model given a prompt.
+    
+    Args:
+        prompt (str): The input prompt.
+        model (torch.nn.Module): The language model.
+        tokenizer (transformers.PreTrainedTokenizer): The tokenizer for the model.
+    
+    Returns:
+        str: The generated text.
+    """
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     model.eval()
     with torch.no_grad():
