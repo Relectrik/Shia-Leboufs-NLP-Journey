@@ -1,5 +1,7 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from emotion_classifier import get_emotion
+import pandas as pd
 
 # Set the checkpoint to Qwen2.5 1.5B Instruct model
 ckpt = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -49,11 +51,11 @@ continuation = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 continuation = continuation.split("\n")[0]
 print("Story: " + continuation)
 context += " " + continuation + "\n"
-
+preferences: pd.DataFrame = pd.DataFrame(columns=["Context", "Response", "Emotion"])
 # Start the interactive game loop.
 while True:
     player_action = input("Player: ").strip()
-
+    preferences = preferences.append({"Context": continuation,"Response": player_action, "Emotion": get_emotion(player_action)}, ignore_index=True)
     # If the player wants to exit the game
     if player_action.lower() in ["quit", "exit"]:
         print("You have exited the game. Goodbye!")
@@ -77,6 +79,7 @@ while True:
         generated_ids = generation[0][input_len:]
         continuation = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
     continuation = continuation.split("\n")[0]  # Only use the first generated line.
-    
     print("Story: " + continuation)
     context += " " + continuation + "\n"
+
+preferences.to_csv("preferences.csv", index=False)  # Save preferences to CSV file.
