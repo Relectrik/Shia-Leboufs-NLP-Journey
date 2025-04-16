@@ -53,6 +53,8 @@ context += " " + continuation + "\n"
 # Start the interactive game loop.
 while True:
     player_action = input("Player: ").strip()
+
+    # If the player wants to exit the game
     if player_action.lower() in ["quit", "exit"]:
         print("You have exited the game. Goodbye!")
         break
