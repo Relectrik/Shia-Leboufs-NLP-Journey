@@ -1,67 +1,82 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# ----- MODEL AND TOKENIZER SETUP -----
-# Load the GPT-2 small model and tokenizer from Hugging Face
-model_name = "gpt2"  # GPT-2 small (124M parameters)
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
-model.eval()  # Switch model to evaluation mode (disables dropout, etc.)
+# Set the checkpoint to Qwen2.5 1.5B Instruct model
+ckpt = "Qwen/Qwen2.5-1.5B-Instruct"
 
-# Set device to Apple MPS (Metal Performance Shaders) if available, else CPU
-device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-model.to(device)
+# Load the tokenizer and model with trust_remote_code enabled.
+# (Adjust torch_dtype if necessary; here we use float16 for faster inference.)
+tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    ckpt,
+    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
+model.eval()
 
-# ----- INITIAL GAME CONTEXT -----
-# This is the starting point of the interactive horror story
+# Read each line from "context.txt" as initial inspiration.
+original_context = ""
+file_path = "context.txt"
+try:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        for line in file:
+            original_context += line.strip() + "\n"
+except FileNotFoundError:
+    print(f"File {file_path} not found. Starting with an empty context.")
+
+# Initialize the story context using the file content as inspiration.
 context = (
-    "Story: You're walking in a dark, dense forest at midnight. "
-    "There's no one around and your phone is dead. "
-    "Out of the corner of your eye, you spot him – Shia LaBeouf, "
-    "the Hollywood actor, and he's covered in blood.\n"
+    f"Use this song as inspiration to generate a story: {original_context}\n"
+    "Make sure your responses are full sentences before a newline.\n"
+    "Story:"
 )
 
-print(context.strip())  # Display the intro story once at the start
+# Tokenize the current context and move tensors to the device.
+model_inputs = tokenizer(context, return_tensors="pt").to(model.device)
+input_len = model_inputs["input_ids"].shape[-1]
 
-# ----- GAME LOOP -----
-# This loop allows the player to interactively influence the story
+# Generate an initial continuation.
+with torch.inference_mode():
+    generation = model.generate(
+        **model_inputs,
+        max_new_tokens=100,
+    )
+# Extract the tokens generated after the original context.
+generated_ids = generation[0][input_len:]
+continuation = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+# Limit to the first generated line for clarity.
+continuation = continuation.split("\n")[0]
+print("Story: " + continuation)
+context += " " + continuation + "\n"
+
+# Start the interactive game loop.
 while True:
-    # Prompt the player for an action/response
     player_action = input("Player: ").strip()
 
     # If the player wants to exit the game
     if player_action.lower() in ["quit", "exit"]:
         print("You have exited the game. Goodbye!")
         break
-
-    # If the player gives empty input, skip generation
-    if player_action == "":
-        continue
-
-    # Add the player's input to the context
+    if not player_action:
+        continue  # Skip empty input.
+    
+    # Append player's action and add a prompt for the next part of the story.
     context += f"Player: {player_action}\n"
-    context += "Story:"  # Append the cue for the model to continue the story
+    context += "Story:"  # Marker for the continuation prompt.
+    
+    # Tokenize updated context.
+    model_inputs = tokenizer(context, return_tensors="pt").to(model.device)
+    input_len = model_inputs["input_ids"].shape[-1]
 
-    # Encode the context as input for the model
-    input_ids = tokenizer.encode(context, return_tensors='pt').to(device)
-
-    # Generate a continuation of the story using the model
-    output_ids = model.generate(
-        input_ids,
-        max_length=input_ids.shape[1] + 500,  # Allow up to 500 new tokens
-        do_sample=True,            # Enable sampling (not greedy decoding)
-        top_p=0.9,                 # Nucleus sampling for diverse outputs
-        temperature=1.0,           # Higher temp for more randomness
-        pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id
-    )
-
-    # Extract only the generated part (after the original context)
-    generated_ids = output_ids[0][input_ids.shape[1]:]
-    continuation = tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-    # Display the generated story continuation
-    print("Story: " + continuation.strip())
-
-    # Update the context with the newly generated content
-    context += " " + continuation.strip() + "\n"
+    with torch.inference_mode():
+        generation = model.generate(
+            **model_inputs,
+            max_new_tokens=100,
+        )
+        generated_ids = generation[0][input_len:]
+        continuation = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    continuation = continuation.split("\n")[0]  # Only use the first generated line.
+    
+    print("Story: " + continuation)
+    context += " " + continuation + "\n"
