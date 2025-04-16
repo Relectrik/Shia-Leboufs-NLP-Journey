@@ -6,7 +6,7 @@ Direct Preference Optimization with a narrative-based game using the Shia Lebouf
 ## We are currently still developing!
 ### But if you'd like to try:
 ```
-pip install transformers torch
+pip install transformers torch accelerate
 ```
 To run the base narrative game:
 ```
