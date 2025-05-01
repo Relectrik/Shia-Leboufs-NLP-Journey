@@ -1,31 +1,36 @@
-import math, numpy as np
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import math
+import random
+import numpy as np
+import torch
+import textstat
+from transformers import AutoTokenizer
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
-# ----- LOAD MODELS AND TOKENIZER -----
-baseline = AutoModelForCausalLM.from_pretrained("gpt2")
-fine_tuned = AutoModelForCausalLM.from_pretrained("gpt2-shia-dpo")
+# ----- SET RANDOM SEED -----
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+set_seed(42)
+
+# ----- LOAD TOKENIZER -----
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-# ----- TEST PROMPTS -----
-# These prompts simulate interactive or narrative game scenarios involving Shia LaBeouf.
+# ----- PROMPTS TO TEST AGAINST -----
 test_prompts = [
-    "Story: You're injured and exhausted. Shia LaBeouf is limping towards you.\nPlayer: attempt to reason with him\nStory:",
-    "Story: You find a cabin in the woods that might be safe. Shia is somewhere behind you.\nPlayer: hide inside the cabin\nStory:",
-    "Story: Shia LaBeouf has been defeated. He's lying on the ground.\nPlayer: deliver a witty final line\nStory:"
+    # "Story: You're injured and exhausted. Shia LaBeouf is limping towards you.\nPlayer: attempt to reason with him\nStory:",
+    # "Story: You find a cabin in the woods that might be safe. Shia is somewhere behind you.\nPlayer: hide inside the cabin\nStory:",
+    # "Story: Shia LaBeouf has been defeated. He's lying on the ground.\nPlayer: deliver a witty final line\nStory:"
+    "Tell me why biofuel is useful.",
+    "Explain how algae can be used to power homes.",
+    "Describe how solar panels can float on lakes."
 ]
 
 def generate_story(model, prompt):
-    """
-    Generates a continuation of a given story prompt using the specified language model.
-    
-    Args:
-        model (AutoModelForCausalLM): A causal language model (e.g., GPT-2).
-        prompt (str): The input story prompt to continue.
-    
-    Returns:
-        str: The generated continuation text.
-    """
-    input_ids = tokenizer.encode(prompt, return_tensors='pt')
+    input_ids = tokenizer.encode(prompt, return_tensors='pt').to(model.device)
     output_ids = model.generate(
         input_ids,
         max_length=input_ids.shape[1] + 60,
@@ -35,25 +40,9 @@ def generate_story(model, prompt):
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id
     )
-    generated = tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
-    return generated
-
-# ----- GATHER GENERATED OUTPUTS -----
-baseline_outputs = [generate_story(baseline, p) for p in test_prompts]
-dpo_outputs = [generate_story(fine_tuned, p) for p in test_prompts]
+    return tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
 
 def distinct_n(outputs, n=2):
-    """
-    Computes the distinct-n metric for a list of generated outputs. 
-    This measures lexical diversity by calculating the ratio of unique n-grams to total n-grams.
-    
-    Args:
-        outputs (list of str): List of generated text outputs.
-        n (int): Size of n-gram (e.g., 1 for unigrams, 2 for bigrams).
-    
-    Returns:
-        float: The distinct-n score (between 0 and 1).
-    """
     total_ngrams = 0
     unique_ngrams = set()
     for text in outputs:
@@ -64,16 +53,58 @@ def distinct_n(outputs, n=2):
             total_ngrams += 1
     return (len(unique_ngrams) / total_ngrams) if total_ngrams > 0 else 0
 
-def diversity_metrics():
-    """
-    Computes and prints diversity metrics for baseline and fine-tuned models.
-    Metrics include:
-        - Distinct-1 (unigram diversity)
-        - Distinct-2 (bigram diversity)
-        - Average output length (in words)
-    """
-    for name, outs in [("Baseline", baseline_outputs), ("DPO", dpo_outputs)]:
-        d1 = distinct_n(outs, n=1)
-        d2 = distinct_n(outs, n=2)
-        avg_len = np.mean([len(o.split()) for o in outs])
-        print(f"{name} -> Distinct-1: {d1:.3f}, Distinct-2: {d2:.3f}, Avg length: {avg_len:.1f} words")
+def compute_self_bleu(generations):
+    smooth_fn = SmoothingFunction().method1
+    scores = []
+    for i in range(len(generations)):
+        references = [g.split() for j, g in enumerate(generations) if i != j]
+        candidate = generations[i].split()
+        scores.append(sentence_bleu(references, candidate, smoothing_function=smooth_fn))
+    return sum(scores) / len(scores)
+
+def compute_kl_divergence(prompt, model, baseline):
+    input_ids = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        logits_base = baseline(**input_ids).logits
+        logits_model = model(**input_ids).logits
+
+    probs_base = torch.softmax(logits_base, dim=-1)
+    probs_model = torch.softmax(logits_model, dim=-1)
+    kl = torch.nn.functional.kl_div(probs_model.log(), probs_base, reduction="batchmean")
+    return kl.item()
+
+def readability_scores(outputs):
+    return [textstat.flesch_reading_ease(o) for o in outputs]
+
+# ---- MAIN EVAL FUNCTION TO BE CALLED ----
+def evaluate_model(model):
+    from transformers import AutoModelForCausalLM
+    baseline = AutoModelForCausalLM.from_pretrained("gpt2").to(model.device)
+    model.eval()
+
+    outputs = [generate_story(model, p) for p in test_prompts]
+    print("Generated Outputs:")
+    for i, output in enumerate(outputs):
+        print(f"Prompt {i+1}: {output}")
+
+    d1 = distinct_n(outputs, n=1)
+    d2 = distinct_n(outputs, n=2)
+    avg_len = np.mean([len(o.split()) for o in outputs])
+    sb = compute_self_bleu(outputs)
+    kl = np.mean([compute_kl_divergence(p, model, baseline) for p in test_prompts])
+    readability = readability_scores(outputs)
+
+    return {
+        "distinct_1": d1,
+        "distinct_2": d2,
+        "avg_len": avg_len,
+        "self_bleu": sb,
+        "kl": kl,
+        "readability_mean": np.mean(readability),
+        "readability_std": np.std(readability)
+    }
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# model = AutoModelForCausalLM.from_pretrained('gpt2-shia-dpo')
+
+# evaluate_model(model)
