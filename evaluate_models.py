@@ -34,9 +34,11 @@ def generate_story(model, prompt):
     output_ids = model.generate(
         input_ids,
         max_length=input_ids.shape[1] + 60,
-        do_sample=True,
+        do_sample=False,
         top_p=0.9,
         temperature=0.8,
+        # repetition_penalty=1.2,
+        # no_repeat_ngram_size=3,
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id
     )
@@ -78,6 +80,7 @@ def readability_scores(outputs):
 
 # ---- MAIN EVAL FUNCTION TO BE CALLED ----
 def evaluate_model(model):
+    set_seed(42)
     from transformers import AutoModelForCausalLM
     baseline = AutoModelForCausalLM.from_pretrained("gpt2").to(model.device)
     model.eval()

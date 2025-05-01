@@ -22,9 +22,9 @@ tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 model = AutoModelForCausalLM.from_pretrained(base_model_name)
 model.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 model.train()
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-6)
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-7)
 scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=3)
-beta = 0.5
+beta = 1.0
 device = model.device
 
 # ----- HARDWIRED TRAINING DATA -----
@@ -144,21 +144,30 @@ def train_model(model, tokenizer, df, epochs=15, eval_interval=5, metrics_log=No
         avg_loss = total_loss / len(df)
         print(f"Epoch {epoch + 1} complete. Avg loss: {avg_loss:.4f}")
 
-        if metrics_log is not None and (epoch + 1) % eval_interval == 0:
-            print(f"Evaluating at epoch {epoch + 1}...")
-            metrics = evaluate_model(model)
-            metrics["epoch"] = epoch + 1
-            metrics_log.append(metrics)
+        # if metrics_log is not None and (epoch + 1) % eval_interval == 0:
+        #     print(f"Evaluating at epoch {epoch + 1}...")
+        #     metrics = evaluate_model(model)
+        #     metrics["epoch"] = epoch + 1
+        #     metrics_log.append(metrics)
 
 # ----- TRAIN AND EVALUATE -----
+
 metrics_log = []
-for e in range(15):
-    print(f"=== Training for {e} epochs ===")
-    train_model(model, tokenizer, pairs_df, epochs=e, eval_interval=e, metrics_log=metrics_log)
-    print(f"Running additional evaluation after {e} epochs...")
-    metrics = evaluate_model(model)
-    metrics["epoch"] = e
-    metrics_log.append(metrics)
+for e in range(1, 31):
+    print(f"\n=== Training epoch {e} ===")
+    train_model(model, tokenizer, pairs_df, epochs=1, metrics_log=None)
+
+    print(f"Running evaluation after epoch {e}...")
+    dpo_metrics = evaluate_model(model)
+    dpo_metrics["epoch"] = e
+    dpo_metrics["model"] = "DPO"
+
+    baseline_model = AutoModelForCausalLM.from_pretrained(base_model_name).to(device)
+    baseline_metrics = evaluate_model(baseline_model)
+    baseline_metrics["epoch"] = e
+    baseline_metrics["model"] = "Baseline"
+
+    metrics_log.extend([dpo_metrics, baseline_metrics])
 
 # ----- SAVE MODEL -----
 model.save_pretrained("gpt2-shia-dpo")
@@ -169,9 +178,18 @@ if metrics_log:
     df_metrics = pd.DataFrame(metrics_log)
     for col in ["distinct_1", "distinct_2", "self_bleu", "kl", "avg_len", "readability_mean"]:
         plt.figure()
-        plt.plot(df_metrics["epoch"], df_metrics[col])
+        for model_name in ["DPO", "Baseline"]:
+            df_subset = df_metrics[df_metrics["model"] == model_name]
+            linestyle = "--" if model_name == "Baseline" else "-"
+            plt.plot(
+                df_subset["epoch"],
+                df_subset[col],
+                label=model_name,
+                linestyle=linestyle
+            )
         plt.xlabel("Epoch")
         plt.ylabel(col)
         plt.title(f"{col} over Epochs")
+        plt.legend()
         plt.grid(True)
         plt.show()
